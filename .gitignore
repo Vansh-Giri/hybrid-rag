@@ -1,0 +1,10 @@
+# Environments
+venv/
+__pycache__/
+
+# Data and Databases
+data/
+vectorstore/
+
+# OS Files
+.DS_Store
