@@ -75,37 +75,40 @@ class RAGEvaluator:
         }
 
 if __name__ == "__main__":
-    # 1. Boot up the Retrieval Pipeline
-    test_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    raw_docs = load_directory(test_dir)
-    cleaned_docs = clean_documents(raw_docs)
-    chunks = process_chunks(cleaned_docs, strategy="recursive", chunk_size=500, overlap=50)
-
-    dense = DenseRetriever()
-    dense.index_documents(chunks)
-    sparse = SparseRetriever()
-    sparse.index_documents(chunks)
+    db_dir = os.path.join(os.path.dirname(__file__), "..", "vectorstore")
     
-    # Test with 50/50 fusion weight
+    print("Loading existing databases from disk...")
+    
+    # Load from disk instead of re-indexing!
+    dense = DenseRetriever()
+    dense.load(db_dir)
+    
+    sparse = SparseRetriever()
+    sparse.load(db_dir)
+    
+    # Initialize Hybrid Retriever
     hybrid = HybridRetriever(dense, sparse, alpha=0.5)
 
-    # 2. Define Ground Truth Dataset
-    # We use excerpts from your synopsis PDF as the expected source
+    # Define Ground Truth Dataset for Technical Testing
     ground_truth_data = [
         {
-            "query": "What are the hardware requirements?",
-            "expected_source": "Major Project Synopsis.pdf"
+            "query": "What is the equation for Scaled Dot-Product Attention?",
+            "expected_source": "attention_paper.pdf"
         },
         {
-            "query": "What chunking strategies are used?",
-            "expected_source": "Major Project Synopsis.pdf"
+            "query": "Why did the authors choose to use Multi-Head Attention instead of a single attention function?",
+            "expected_source": "attention_paper.pdf"
         },
         {
-            "query": "BM25 or TF-IDF",
-            "expected_source": "Major Project Synopsis.pdf"
+            "query": "What is the default port number that the PostgreSQL server listens on?",
+            "expected_source": "postgres_docs.pdf"
+        },
+        {
+            "query": "What is the primary purpose of the Write-Ahead Log (WAL) in PostgreSQL?",
+            "expected_source": "postgres_docs.pdf"
         }
     ]
 
-    # 3. Run Evaluator
+    # Run Evaluator
     evaluator = RAGEvaluator(retriever=hybrid, top_k=3)
     evaluator.evaluate(ground_truth_data)

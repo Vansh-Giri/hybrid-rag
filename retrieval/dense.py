@@ -4,6 +4,7 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from typing import List, Dict, Tuple
 import pickle
+from tqdm import tqdm
 
 class DenseRetriever:
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
@@ -26,7 +27,7 @@ class DenseRetriever:
         texts = [chunk["text"] for chunk in chunks]
         
         print(f"Creating dense embeddings for {len(texts)} chunks...")
-        embeddings = self.model.encode(texts, convert_to_numpy=True)
+        embeddings = self.model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
         
         print("Adding embeddings to FAISS index...")
         self.index.add(embeddings)

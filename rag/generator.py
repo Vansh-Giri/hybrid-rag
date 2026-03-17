@@ -49,7 +49,7 @@ Answer:"""
             "options": {
                 "num_ctx": 4096,
                 "temperature": 0.1,
-                "stop": ["\nQuestion:", "Question:"] # Forces the model to stop generating
+                "stop": ["\nQuestion:", "Question:"]
             }
         }
 
