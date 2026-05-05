@@ -78,8 +78,7 @@ if __name__ == "__main__":
     db_dir = os.path.join(os.path.dirname(__file__), "..", "vectorstore")
     
     print("Loading existing databases from disk...")
-    
-    # Load from disk instead of re-indexing!
+    # Load from disk instead of re-indexing
     dense = DenseRetriever()
     dense.load(db_dir)
     
@@ -91,24 +90,42 @@ if __name__ == "__main__":
 
     # Define Ground Truth Dataset for Technical Testing
     ground_truth_data = [
-        {
-            "query": "What is the equation for Scaled Dot-Product Attention?",
-            "expected_source": "attention_paper.pdf"
-        },
-        {
-            "query": "Why did the authors choose to use Multi-Head Attention instead of a single attention function?",
-            "expected_source": "attention_paper.pdf"
-        },
-        {
-            "query": "What is the default port number that the PostgreSQL server listens on?",
-            "expected_source": "postgres_docs.pdf"
-        },
-        {
-            "query": "What is the primary purpose of the Write-Ahead Log (WAL) in PostgreSQL?",
-            "expected_source": "postgres_docs.pdf"
-        }
+        {"query": "What is the equation for Scaled Dot-Product Attention?", "expected_source": "attention_paper.pdf"},
+        {"query": "Why did the authors choose to use Multi-Head Attention instead of a single attention function?", "expected_source": "attention_paper.pdf"},
+        {"query": "What is the default port number that the PostgreSQL server listens on?", "expected_source": "postgres_docs.pdf"},
+        {"query": "What is the primary purpose of the Write-Ahead Log (WAL) in PostgreSQL?", "expected_source": "postgres_docs.pdf"}
     ]
 
-    # Run Evaluator
-    evaluator = RAGEvaluator(retriever=hybrid, top_k=3)
-    evaluator.evaluate(ground_truth_data)
+    # Set up the evaluation loop
+    models_to_test = [
+        ("Sparse (BM25)", sparse),
+        ("Dense (FAISS)", dense),
+        ("Hybrid (Alpha=0.5)", hybrid)
+    ]
+
+    results_table = []
+
+    for name, retriever_instance in models_to_test:
+        print(f"\n========================================")
+        print(f"Evaluating Model: {name}")
+        print(f"========================================")
+        
+        evaluator = RAGEvaluator(retriever=retriever_instance, top_k=3)
+        metrics = evaluator.evaluate(ground_truth_data)
+        
+        results_table.append({
+            "Model": name,
+            "Precision@3": f"{metrics['precision']:.2f}",
+            "Recall@3": f"{metrics['recall']:.2f}",
+            "Latency (s)": f"{metrics['latency']:.3f}",
+            "Memory (MB)": f"{metrics['memory_mb']:.2f}"
+        })
+
+    # Print Final Comparison Table for Final Report
+    print("\n\n✅ FINAL EVALUATION TABLE (For Major Project Report) ✅")
+    print("-" * 75)
+    print(f"{'Method':<20} | {'Precision@3':<12} | {'Recall@3':<10} | {'Latency':<10} | {'Memory'}")
+    print("-" * 75)
+    for row in results_table:
+        print(f"{row['Model']:<20} | {row['Precision@3']:<12} | {row['Recall@3']:<10} | {row['Latency (s)'] + 's':<10} | {row['Memory (MB)']} MB")
+    print("-" * 75)

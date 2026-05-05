@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
+import time
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -51,6 +52,7 @@ app = FastAPI(title="Hybrid RAG API", lifespan=lifespan)
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 3
+    alpha: float = 0.5
 
 class SourceItem(BaseModel):
     source: str
@@ -61,6 +63,7 @@ class QueryResponse(BaseModel):
     query: str
     answer: str
     sources: List[SourceItem]
+    latency_seconds: float
 
 @app.post("/index")
 def index_documents():
@@ -97,8 +100,13 @@ def query_system(request: QueryRequest):
     if not pipeline_state["is_indexed"]:
         raise HTTPException(status_code=400, detail="System not indexed.")
         
+    start_time = time.time() # Start timer
+    
     hybrid = pipeline_state["hybrid"]
     generator = pipeline_state["generator"]
+    
+    # Dynamically update alpha for this specific query
+    hybrid.alpha = request.alpha
     
     top_chunks = hybrid.search(request.query, top_k=request.top_k)
     answer = generator.generate_answer(request.query, top_chunks)
@@ -112,4 +120,11 @@ def query_system(request: QueryRequest):
         for chunk, score in top_chunks
     ]
     
-    return QueryResponse(query=request.query, answer=answer, sources=sources)
+    latency = round(time.time() - start_time, 2) # End timer
+    
+    return QueryResponse(
+        query=request.query, 
+        answer=answer, 
+        sources=sources,
+        latency_seconds=latency
+    )

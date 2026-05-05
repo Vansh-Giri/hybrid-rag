@@ -1,0 +1,18 @@
+[
+  {
+    "query": "What is the equation for Scaled Dot-Product Attention?",
+    "expected_source": "attention_paper.pdf"
+  },
+  {
+    "query": "Why did the authors choose to use Multi-Head Attention instead of a single attention function?",
+    "expected_source": "attention_paper.pdf"
+  },
+  {
+    "query": "What is the primary purpose of the Write-Ahead Log (WAL) in PostgreSQL?",
+    "expected_source": "postgres_docs.pdf"
+  },
+  {
+    "query": "What is the default port number that the PostgreSQL server listens on?",
+    "expected_source": "postgres_docs.pdf"
+  }
+]

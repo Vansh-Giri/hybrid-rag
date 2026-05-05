@@ -47,7 +47,7 @@ Answer:"""
             "prompt": prompt,
             "stream": False,
             "options": {
-                "num_ctx": 4096,
+                "num_ctx": 2048,
                 "temperature": 0.1,
                 "stop": ["\nQuestion:", "Question:"]
             }
