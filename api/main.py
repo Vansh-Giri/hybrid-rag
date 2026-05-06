@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 import time
+from sentence_transformers import SentenceTransformer
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,8 +24,7 @@ pipeline_state = {
     "dense": None,
     "sparse": None,
     "hybrid": None,
-    # Explicitly use -latest to avoid 404 routing errors on the API
-    "generator": RAGGenerator(model_name="gemini-1.5-flash-latest"),
+    "generator": RAGGenerator(gemini_model="gemini-2.5-flash", groq_model="llama-3.1-8b-instant"),
     "is_indexed": False
 }
 
@@ -51,7 +51,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Hybrid RAG API", lifespan=lifespan)
 
 # --- Pydantic Models ---
-# Defined FIRST so QueryRequest can reference it
 class ChatMessage(BaseModel):
     role: str
     content: str
@@ -61,6 +60,7 @@ class QueryRequest(BaseModel):
     top_k: int = 3
     alpha: float = 0.5
     history: List[ChatMessage] = []
+    provider: str = "gemini"
 
 class SourceItem(BaseModel):
     source: str
@@ -72,6 +72,7 @@ class QueryResponse(BaseModel):
     answer: str
     sources: List[SourceItem]
     latency_seconds: float
+    used_fallback: bool
 
 
 @app.post("/index")
@@ -85,22 +86,36 @@ def index_documents():
             raise HTTPException(status_code=404, detail="No documents found.")
             
         cleaned_docs = clean_documents(raw_docs)
-        chunks = process_chunks(cleaned_docs, strategy="recursive", chunk_size=500, overlap=50)
+        
+        # Initialize local embedding model for Semantic Chunking
+        print("Loading embedding model for Semantic Chunking...")
+        embedder = SentenceTransformer("all-MiniLM-L6-v2")
+        
+        # Process using the semantic strategy
+        print("Processing Semantic Chunks...")
+        chunks = process_chunks(
+            cleaned_docs, 
+            strategy="semantic", 
+            embedder=embedder
+        )
+
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No valid chunks generated. Check document formatting.")
 
         dense = DenseRetriever()
         dense.index_documents(chunks)
-        dense.save(DB_DIR) # Save to disk!
+        dense.save(DB_DIR) 
         
         sparse = SparseRetriever()
         sparse.index_documents(chunks)
-        sparse.save(DB_DIR) # Save to disk!
+        sparse.save(DB_DIR) 
         
         pipeline_state["dense"] = dense
         pipeline_state["sparse"] = sparse
         pipeline_state["hybrid"] = HybridRetriever(dense, sparse, alpha=0.5)
         pipeline_state["is_indexed"] = True
         
-        return {"message": f"Successfully processed, indexed, and saved {len(chunks)} chunks to disk."}
+        return {"message": f"Successfully processed, indexed, and saved {len(chunks)} semantic chunks to disk."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -110,24 +125,22 @@ def query_system(request: QueryRequest):
     if not pipeline_state["is_indexed"]:
         raise HTTPException(status_code=400, detail="System not indexed.")
         
-    start_time = time.time() # Start timer
+    start_time = time.time()
     
     hybrid = pipeline_state["hybrid"]
     generator = pipeline_state["generator"]
     
-    # Dynamically update alpha for this specific query
     hybrid.alpha = request.alpha
-    
-    # 1. Retrieve Context
     top_chunks = hybrid.search(request.query, top_k=request.top_k)
-    
-    # 2. Extract History from the request
     history_dicts = [{"role": msg.role, "content": msg.content} for msg in request.history]
     
-    # 3. Generate Answer (Passing history)
-    answer = generator.generate_answer(request.query, top_chunks, history=history_dicts)
+    answer, used_fallback = generator.generate_answer(
+        request.query, 
+        top_chunks, 
+        history=history_dicts, 
+        provider=request.provider
+    )
     
-    # 4. Format Sources
     sources = [
         {
             "source": os.path.basename(chunk["metadata"].get("source", "Unknown")),
@@ -137,11 +150,12 @@ def query_system(request: QueryRequest):
         for chunk, score in top_chunks
     ]
     
-    latency = round(time.time() - start_time, 2) # End timer
+    latency = round(time.time() - start_time, 2)
     
     return QueryResponse(
         query=request.query, 
         answer=answer, 
         sources=sources,
-        latency_seconds=latency
+        latency_seconds=latency,
+        used_fallback=used_fallback
     )

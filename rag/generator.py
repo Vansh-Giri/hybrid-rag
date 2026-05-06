@@ -1,33 +1,42 @@
 import os
-import google.generativeai as genai
+import requests
 from typing import List, Dict, Tuple
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
+from groq import Groq
 
 load_dotenv()
 
 class RAGGenerator:
-    # CHANGED: Use -latest to avoid 404 routing errors
-    def __init__(self, model_name: str = "gemini-1.5-flash-latest"):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY environment variable not set.")
+    # Updated default models based on current API availability
+    def __init__(self, gemini_model="gemini-2.5-flash", ollama_model="phi4-mini:latest", groq_model="llama-3.1-8b-instant"):
+        self.gemini_model = gemini_model
+        self.ollama_model = ollama_model
+        self.groq_model = groq_model
+        self.ollama_url = "http://localhost:11434/api/generate"
         
-        genai.configure(api_key=api_key)
-        self.model_name = model_name
-        
-        self.model = genai.GenerativeModel(
-            model_name=self.model_name,
-            system_instruction="You are a helpful and precise technical assistant. Use ONLY the provided retrieved context to answer the user's question. If the answer is not contained within the context, say 'I don't have enough information in the provided documents to answer that.' Do not hallucinate."
+        # Hardened system prompt to force exact mathematical output and strip conversational fluff
+        self.system_instruction = (
+            "You are a strict, precise technical assistant. Use ONLY the provided context to answer. "
+            "CRITICAL: If the user asks for a formula, equation, or code, extract it exactly as it appears in the context. "
+            "Wrap all mathematical formulas in standard LaTeX delimiters ($$ equation $$). "
+            "Do not add conversational filler. If the answer is not explicitly in the context, output exactly: 'Information not found in context.'"
         )
         
+        # Initialize Clients
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        self.gemini_client = genai.Client(api_key=gemini_key) if gemini_key else None
+        
+        groq_key = os.getenv("GROQ_API_KEY")
+        self.groq_client = Groq(api_key=groq_key) if groq_key else None
+
     def _build_prompt(self, query: str, context_chunks: List[Tuple[Dict, float]], history: List[Dict] = None) -> str:
-        """Constructs the payload string using retrieved context and previous chat history."""
         context_text = "\n\n---\n\n".join(
             [f"Source: {chunk['metadata'].get('source', 'Unknown')} (Page {chunk['metadata'].get('page', 'N/A')})\n{chunk['text']}" 
              for chunk, _ in context_chunks]
         )
         
-        # Inject the last 3 conversational turns to maintain context
         history_text = ""
         if history:
             recent_history = history[-3:] 
@@ -35,27 +44,66 @@ class RAGGenerator:
                 [f"{m['role'].capitalize()}: {m['content']}" for m in recent_history]
             ) + "\n\n"
         
-        prompt = f"""{history_text}Context:
-{context_text}
+        return f"{history_text}Context:\n{context_text}\n\nCurrent Question: {query}\n\nAnswer:"
 
-Current Question: {query}
+    def _generate_gemini(self, prompt: str) -> str:
+        if not self.gemini_client:
+            raise ValueError("Gemini API key not configured.")
+        response = self.gemini_client.models.generate_content(
+            model=self.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=self.system_instruction,
+                temperature=0.0, # Zero temperature for strict extraction
+            )
+        )
+        return response.text
 
-Answer:"""
-        return prompt
+    def _generate_groq(self, prompt: str) -> str:
+        if not self.groq_client:
+            raise ValueError("Groq API key not configured.")
+        
+        chat_completion = self.groq_client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": self.system_instruction},
+                {"role": "user", "content": prompt}
+            ],
+            model=self.groq_model,
+            temperature=0.0,
+        )
+        return chat_completion.choices[0].message.content
 
-    def generate_answer(self, query: str, context_chunks: List[Tuple[Dict, float]], history: List[Dict] = None) -> str:
-        """Sends the prompt and history to the Gemini API."""
+    def _generate_ollama(self, prompt: str) -> str:
+        payload = {
+            "model": self.ollama_model,
+            "prompt": f"{self.system_instruction}\n\n{prompt}",
+            "stream": False,
+            "options": {"num_ctx": 2048, "temperature": 0.0, "stop": ["\nQuestion:", "Current Question:"]}
+        }
+        response = requests.post(self.ollama_url, json=payload, timeout=60.0)
+        response.raise_for_status()
+        return response.json().get("response", "")
+
+    def generate_answer(self, query: str, context_chunks: List[Tuple[Dict, float]], history: List[Dict] = None, provider: str = "gemini") -> Tuple[str, bool]:
         if not context_chunks:
-            return "No relevant context found to answer the query."
+            return "No relevant context found to answer the query.", False
 
         prompt = self._build_prompt(query, context_chunks, history)
+        used_fallback = False
         
-        print(f"Sending prompt to cloud API ({self.model_name})...")
         try:
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(temperature=0.1)
-            )
-            return response.text
-        except Exception as e:
-            return f"Error during generation: {str(e)}"
+            if provider == "gemini":
+                return self._generate_gemini(prompt), used_fallback
+            elif provider == "groq":
+                return self._generate_groq(prompt), used_fallback
+            else:
+                return self._generate_ollama(prompt), used_fallback
+                
+        except Exception as primary_e:
+            print(f"Primary provider '{provider}' failed: {primary_e}. Triggering fallback to Groq...")
+            used_fallback = True
+            try:
+                # Fallback to Groq (fastest, most reliable)
+                return self._generate_groq(prompt), used_fallback
+            except Exception as fallback_e:
+                return f"System Failure. Primary Error: {primary_e} | Fallback Error: {fallback_e}", used_fallback

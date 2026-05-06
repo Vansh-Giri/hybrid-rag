@@ -1,0 +1,38 @@
+[
+    {
+        "query": "What is the equation for Scaled Dot-Product Attention?",
+        "answer": "$$ \\text{Attention}(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{d_k}\\right)V $$",
+        "latency": 15.18,
+        "accuracy": 8,
+        "completeness": 9,
+        "alpha": 0.5,
+        "provider": "gemini"
+    },
+    {
+        "query": "Why did the authors choose to use Multi-Head Attention instead of a single attention function?",
+        "answer": "Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions. With a single attention head, averaging inhibits this.",
+        "latency": 1.39,
+        "accuracy": 8,
+        "completeness": 9,
+        "alpha": 0.5,
+        "provider": "gemini"
+    },
+    {
+        "query": "What is the default port number that the PostgreSQL server listens on?",
+        "answer": "5432",
+        "latency": 1.79,
+        "accuracy": 8,
+        "completeness": 9,
+        "alpha": 0.5,
+        "provider": "gemini"
+    },
+    {
+        "query": "What is the primary purpose of the Write-Ahead Log (WAL) in PostgreSQL?",
+        "answer": "The aim of WAL is to ensure that the log is written before database records are altered.",
+        "latency": 1.7,
+        "accuracy": 8,
+        "completeness": 9,
+        "alpha": 0.5,
+        "provider": "gemini"
+    }
+]
