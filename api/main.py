@@ -23,7 +23,8 @@ pipeline_state = {
     "dense": None,
     "sparse": None,
     "hybrid": None,
-    "generator": RAGGenerator(model_name="phi4-mini:latest"),
+    # Explicitly use -latest to avoid 404 routing errors on the API
+    "generator": RAGGenerator(model_name="gemini-1.5-flash-latest"),
     "is_indexed": False
 }
 
@@ -49,10 +50,17 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Hybrid RAG API", lifespan=lifespan)
 
+# --- Pydantic Models ---
+# Defined FIRST so QueryRequest can reference it
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 3
     alpha: float = 0.5
+    history: List[ChatMessage] = []
 
 class SourceItem(BaseModel):
     source: str
@@ -64,6 +72,7 @@ class QueryResponse(BaseModel):
     answer: str
     sources: List[SourceItem]
     latency_seconds: float
+
 
 @app.post("/index")
 def index_documents():
@@ -95,6 +104,7 @@ def index_documents():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/query", response_model=QueryResponse)
 def query_system(request: QueryRequest):
     if not pipeline_state["is_indexed"]:
@@ -108,9 +118,16 @@ def query_system(request: QueryRequest):
     # Dynamically update alpha for this specific query
     hybrid.alpha = request.alpha
     
+    # 1. Retrieve Context
     top_chunks = hybrid.search(request.query, top_k=request.top_k)
-    answer = generator.generate_answer(request.query, top_chunks)
     
+    # 2. Extract History from the request
+    history_dicts = [{"role": msg.role, "content": msg.content} for msg in request.history]
+    
+    # 3. Generate Answer (Passing history)
+    answer = generator.generate_answer(request.query, top_chunks, history=history_dicts)
+    
+    # 4. Format Sources
     sources = [
         {
             "source": os.path.basename(chunk["metadata"].get("source", "Unknown")),

@@ -8,3 +8,5 @@ vectorstore/
 
 # OS Files
 .DS_Store
+
+.env
