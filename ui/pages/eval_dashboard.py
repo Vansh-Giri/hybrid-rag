@@ -17,10 +17,26 @@ sys.path.append(root_dir)
 # Now it can successfully find config.py in the root directory!
 from config import settings
 
+# 1. Clean Page Configuration
 st.set_page_config(page_title="RAG Evaluation Arena", layout="wide")
 
-st.title("RAG Evaluation")
+# 2. Hide Streamlit's default clutter to match the main app
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            .block-container {
+                padding-top: 2rem;
+                padding-bottom: 2rem;
+            }
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+st.title("RAG Evaluation Arena")
 st.markdown("Upload documents, compare model generations, visualize latency, and trace Reciprocal Rank Fusion (RRF) metrics.")
+st.markdown("---")
 
 API_URL = f"http://{settings.API_HOST}:{settings.API_PORT}/query"
 INDEX_URL = f"http://{settings.API_HOST}:{settings.API_PORT}/index"
@@ -36,7 +52,6 @@ GROUND_TRUTH = {
 
 # --- Sidebar Controls ---
 with st.sidebar:
-    # 1. NEW: Document Management System
     st.header("Document Management")
     uploaded_files = st.file_uploader("Upload New PDF/TXT", type=["pdf", "txt"], accept_multiple_files=True)
     
@@ -60,7 +75,6 @@ with st.sidebar:
 
     st.divider()
 
-    # 2. NEW: Dynamic Query Mode
     st.header("Evaluation Parameters")
     
     query_mode = st.radio("Query Mode", ["Benchmark Questions", "Custom Query"])
@@ -103,7 +117,8 @@ if run_test:
     elif not selected_query.strip():
         st.warning("Please enter a query.")
     else:
-        st.header(f"Query: *\"{selected_query}\"*")
+        st.subheader(f"Query: *\"{selected_query}\"*")
+        st.write("") # Spacer
         
         cols = st.columns(len(models_to_test))
         metrics_data = []
@@ -111,7 +126,7 @@ if run_test:
         # --- API Calls and Data Gathering ---
         for idx, model in enumerate(models_to_test):
             with cols[idx]:
-                st.subheader(f"🤖 {model.upper()}")
+                st.markdown(f"### {model.upper()}")
                 with st.spinner(f"Awaiting {model.upper()}..."):
                     try:
                         payload = {
@@ -145,15 +160,16 @@ if run_test:
                                 "Fallback Used": data.get("used_fallback", False)
                             })
                             
-                            # Display Answer
-                            st.success(data["answer"])
+                            # Display Answer in a clean box
+                            st.info(data["answer"])
                             
-                            # Display RRF Trace
+                            # Display Clean RRF Trace
                             with st.expander("View RRF Retrieval Trace", expanded=False):
                                 st.markdown("**Maximal Marginal Relevance (MMR) Output:**")
                                 for s in data["sources"]:
                                     match_icon = "Y" if expected_source in s["source"] else "N"
-                                    st.caption(f"{match_icon} **{s['source']}** (Page {s['page']}) | Score: `{s['score']}`")
+                                    st.markdown(f"{match_icon} **{s['source']}** (Page {s['page']}) | *Score: {s['score']:.4f}*")
+                                    st.divider()
                                     
                         else:
                             st.error(f"Backend Error: {res.text}")
@@ -163,7 +179,7 @@ if run_test:
         
         # --- Analytics Dashboard ---
         if metrics_data:
-            st.divider()
+            st.markdown("---")
             st.header("Performance Analytics")
             df = pd.DataFrame(metrics_data)
             

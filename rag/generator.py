@@ -29,7 +29,11 @@ class RAGGenerator:
             "WARNING: The context is extracted from academic PDFs using OCR. It may contain noisy formatting, missing spaces, or fragmented math symbols (e.g., 'Q K T' instead of QK^T). "
             "Do your best to logically interpret these noisy fragments and reconstruct the intended mathematical equations. "
             "FORMATTING RULE: Format all reconstructed equations using standard LaTeX wrapped in double dollar signs (e.g., $$ E = mc^2 $$). "
-            "If the concept is genuinely missing from the context, state that you do not have enough information."
+            "CRITICAL INSTRUCTIONS: "
+            "1. Answer directly, confidently, and concisely. "
+            "2. DO NOT use phrases like 'Based on the context', 'According to the document', 'The provided text states', or 'I can infer'. "
+            "3. Act as if you inherently know this information. "
+            "4. If the concept is genuinely missing from the context, output exactly: 'I do not have enough information in the knowledge base to answer that.' Do not elaborate or apologize."
         )
         
         self.gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None

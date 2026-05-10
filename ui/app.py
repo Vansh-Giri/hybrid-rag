@@ -3,11 +3,25 @@ import requests
 
 API_BASE_URL = "http://127.0.0.1:8000"
 
-st.set_page_config(page_title="Hybrid RAG System", layout="centered")
+# 1. Clean Page Configuration (Wide layout for modern feel)
+st.set_page_config(page_title="Hybrid RAG System", layout="wide")
 
-st.title("Technical Knowledge Base Q&A")
-st.markdown("Ask questions about your documents using Hybrid Retrieval. The system features automatic failover between Cloud and Local inference.")
+# 2. Hide Streamlit's default clutter
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            /* Optional: Adjust main padding to make it look more like a chat app */
+            .block-container {
+                padding-top: 2rem;
+                padding-bottom: 2rem;
+            }
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Retrieval Settings")
     alpha_val = st.slider(
@@ -32,7 +46,7 @@ with st.sidebar:
     
     st.divider()
     st.header("System Management")
-    if st.button("Index Documents"):
+    if st.button("Index Documents", use_container_width=True):
         with st.spinner("Indexing..."):
             try:
                 res = requests.post(f"{API_BASE_URL}/index")
@@ -43,32 +57,48 @@ with st.sidebar:
             except requests.exceptions.ConnectionError:
                 st.error("Could not connect to backend.")
                 
-    if st.button("Clear Chat History"):
+    if st.button("Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
 
+# --- MAIN CHAT INTERFACE ---
+st.title("Document Intelligence System")
+st.markdown("---")
+
+# Initialize chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display past chat history (with their specific dropdowns)
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg["role"] == "assistant" and "sources" in msg:
+        
+        # Clean expander for sources on assistant messages
+        if msg["role"] == "assistant" and "sources" in msg and msg["sources"]:
             latency = msg.get("latency", "N/A")
             fallback_note = " | Fallback Engaged" if msg.get("used_fallback") else ""
-            with st.expander(f"View Sources (Completed in {latency}s{fallback_note})"):
+            
+            with st.expander(f"View Retrieved Sources ({latency}s{fallback_note})"):
                 for i, source in enumerate(msg["sources"]):
-                    st.write(f"**Source {i+1}:** {source['source']} (Page {source['page']}) - Score: {source['score']}")
-                    st.write(source.get("text_snippet", ""))
+                    st.markdown(f"**Source {i+1}:** `{source['source']}` (Page {source['page']}) | *Score: {source['score']:.4f}*")
+                    if source.get("text_snippet"):
+                        st.caption(f'"{source["text_snippet"]}"')
+                    st.divider()
 
-if prompt := st.chat_input("What would you like to know?"):
+# Handle new user input
+if prompt := st.chat_input("Ask a question about your uploaded documents..."):
+    
+    # 1. Show user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
+    # 2. Show assistant response
     with st.chat_message("assistant"):
         with st.spinner(f"Generating answer using {provider_choice.upper()}..."):
             try:
+                # Prepare history for context
                 chat_history = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
                 
                 payload = {
@@ -91,12 +121,19 @@ if prompt := st.chat_input("What would you like to know?"):
                     if used_fallback:
                         st.warning(f"Primary model ({provider_choice}) failed. Fallback model was used successfully.")
                     
+                    # Display the text answer
                     st.markdown(answer)
                     
-                    with st.expander(f"View Sources (Completed in {latency}s)"):
-                        for i, source in enumerate(sources):
-                            st.write(f"**Source {i+1}:** {source['source']} (Page {source['page']}) - Score: {source['score']}")
-                            
+                    # Display the clean expander for the new sources
+                    if sources:
+                        with st.expander(f"View Retrieved Sources ({latency}s)"):
+                            for i, source in enumerate(sources):
+                                st.markdown(f"**Source {i+1}:** `{source['source']}` (Page {source['page']}) | *Score: {source['score']:.4f}*")
+                                if source.get("text_snippet"):
+                                    st.caption(f'"{source["text_snippet"]}"')
+                                st.divider()
+                                
+                    # Save to state
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,
@@ -111,4 +148,4 @@ if prompt := st.chat_input("What would you like to know?"):
                     st.error(f"API Error: {response.text}")
                     
             except requests.exceptions.ConnectionError:
-                st.error("Could not connect to the backend API.")
+                st.error("Could not connect to the backend API. Is FastAPI running?")
