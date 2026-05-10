@@ -1,68 +1,46 @@
 import os
-import fitz  # Standard PyMuPDF
-from typing import List, Dict
+import pdfplumber
 
-def load_pdf(file_path: str) -> List[Dict]:
-    """Strictly extracts text using native PyMuPDF to bypass ONNX bugs."""
-    documents = []
-    print(f"Extracting from: {os.path.basename(file_path)}...")
+def load_txt(file_path: str) -> list[dict]:
+    with open(file_path, "r", encoding="utf-8") as f:
+        return [{
+            "text": f.read(), 
+            "metadata": {
+                "source": os.path.basename(file_path), 
+                "page": 1, 
+                "type": "txt"
+            }
+        }]
+
+def load_pdf(file_path: str) -> list[dict]:
+    pages = []
     try:
-        doc = fitz.open(file_path)
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            
-            # Use native markdown extraction if available, fallback to sorted text
-            try:
-                # PyMuPDF 1.24+ supports native markdown
-                text = page.get_text("markdown")
-            except Exception:
-                text = page.get_text("text", sort=True)
-                
-            if text and text.strip():
-                documents.append({
-                    "text": text.strip(),
-                    "metadata": {
-                        "source": file_path, 
-                        "page": page_num + 1
-                    }
-                })
+        with pdfplumber.open(file_path) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = page.extract_text(x_tolerance=2, y_tolerance=2)
+                if text:
+                    pages.append({
+                        "text": text,
+                        "metadata": {
+                            "source": os.path.basename(file_path),
+                            "page": i + 1,
+                            "type": "pdf"
+                        }
+                    })
     except Exception as e:
-        print(f"CRITICAL: Failed to load {os.path.basename(file_path)}: {e}")
-    return documents
+        print(f"Error reading {file_path}: {e}")
+    return pages
 
-def load_txt(file_path: str) -> List[Dict]:
-    """Extracts text from a TXT file."""
-    documents = []
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            text = f.read()
-            if text.strip():
-                documents.append({
-                    "text": text,
-                    "metadata": {"source": file_path}
-                })
-    except Exception as e:
-        print(f"Error loading TXT {file_path}: {e}")
-    return documents
-
-def load_directory(directory_path: str) -> List[Dict]:
-    """Loads all supported documents from a directory."""
+def load_directory(data_dir: str = "data") -> list[dict]:
     all_documents = []
-    if not os.path.exists(directory_path):
-        print(f"Directory not found: {directory_path}")
-        return all_documents
+    if not os.path.exists(data_dir):
+        os.makedirs(data_dir)
+        return []
 
-    for filename in os.listdir(directory_path):
-        file_path = os.path.join(directory_path, filename)
-        if filename.lower().endswith('.pdf'):
-            all_documents.extend(load_pdf(file_path))
-        elif filename.lower().endswith('.txt'):
+    for filename in os.listdir(data_dir):
+        file_path = os.path.join(data_dir, filename)
+        if filename.lower().endswith(".txt"):
             all_documents.extend(load_txt(file_path))
-    
+        elif filename.lower().endswith(".pdf"):
+            all_documents.extend(load_pdf(file_path))
     return all_documents
-
-if __name__ == "__main__":
-    test_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    print(f"Loading documents from: {os.path.abspath(test_dir)}")
-    docs = load_directory(test_dir)
-    print(f"\nSuccessfully loaded {len(docs)} document chunk(s)/page(s).")

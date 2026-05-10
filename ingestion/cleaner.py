@@ -41,12 +41,15 @@ def clean_documents(documents: List[Dict]) -> List[Dict]:
     """Applies advanced cleaning to a list of document dictionaries."""
     cleaned_docs = []
     for doc in documents:
-        cleaned_text = clean_text(doc["text"])
+        # Use .get() to prevent KeyErrors
+        cleaned_text = clean_text(doc.get("text", ""))
+        metadata = doc.get("metadata", {})
+        
         # Increased threshold: Drop chunks that are too short to contain semantic meaning
         if len(cleaned_text) > 50: 
             cleaned_docs.append({
                 "text": cleaned_text,
-                "metadata": doc["metadata"]
+                "metadata": metadata
             })
     return cleaned_docs
 

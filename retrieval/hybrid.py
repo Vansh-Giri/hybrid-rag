@@ -1,117 +1,95 @@
-import os
-from typing import List, Dict, Tuple
+from typing import List, Tuple, Dict
+import numpy as np
+from sentence_transformers import util
 
 class HybridRetriever:
-    def __init__(self, dense_retriever, sparse_retriever, alpha: float = 0.5):
+    def __init__(self, dense_retriever, sparse_retriever, embedder=None, alpha: float = 0.5, rrf_k: int = 60, lambda_mult: float = 0.5):
         """
-        Initializes the hybrid retriever.
-        alpha (float): The weight given to the dense retriever (0.0 to 1.0).
-                       (1 - alpha) will be the weight for the sparse retriever.
+        Initializes the Hybrid Retriever with RRF and MMR.
+        :param dense_retriever: Instance of DenseRetriever
+        :param sparse_retriever: Instance of SparseRetriever
+        :param embedder: SentenceTransformer instance required for MMR diversity calculations
+        :param alpha: Weight for dense vs sparse retrieval
+        :param rrf_k: RRF smoothing constant
+        :param lambda_mult: MMR parameter (1.0 = Max Relevance, 0.0 = Max Diversity, 0.5 = Balanced)
         """
-        self.dense_retriever = dense_retriever
-        self.sparse_retriever = sparse_retriever
+        self.dense = dense_retriever
+        self.sparse = sparse_retriever
+        self.embedder = embedder
         self.alpha = alpha
+        self.rrf_k = rrf_k
+        self.lambda_mult = lambda_mult
 
-    def _normalize_scores(self, scores_dict: Dict[str, float]) -> Dict[str, float]:
-        """Applies Min-Max normalization to a dictionary of scores."""
-        if not scores_dict:
-            return {}
+    def search(self, query: str, top_k: int = 3) -> List[Tuple[Dict, float]]:
+        # 1. Fetch a larger candidate pool for MMR to process
+        fetch_k = max(top_k * 4, 15) 
         
-        values = list(scores_dict.values())
-        min_val = min(values)
-        max_val = max(values)
+        dense_results = self.dense.search(query, top_k=fetch_k)
+        sparse_results = self.sparse.search(query, top_k=fetch_k)
         
-        normalized = {}
-        for chunk_id, score in scores_dict.items():
-            if max_val == min_val:
-                normalized[chunk_id] = 1.0 if max_val > 0 else 0.0
-            else:
-                normalized[chunk_id] = (score - min_val) / (max_val - min_val)
+        fused_scores = {}
+        chunk_map = {}
+        
+        # 2. Calculate Weighted Reciprocal Rank Fusion (RRF)
+        for rank, (chunk, _) in enumerate(dense_results):
+            chunk_id = chunk["metadata"].get("chunk_id", hash(chunk["text"]))
+            chunk_map[chunk_id] = chunk
+            fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (self.alpha / (self.rrf_k + rank + 1))
+            
+        for rank, (chunk, _) in enumerate(sparse_results):
+            chunk_id = chunk["metadata"].get("chunk_id", hash(chunk["text"]))
+            chunk_map[chunk_id] = chunk
+            fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + ((1.0 - self.alpha) / (self.rrf_k + rank + 1))
+            
+        # Sort RRF candidates
+        sorted_candidates = sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
+        candidate_chunks = [(chunk_map[cid], score) for cid, score in sorted_candidates[:fetch_k]]
+
+        # 3. Apply Maximal Marginal Relevance (MMR)
+        if self.embedder is None or len(candidate_chunks) <= top_k:
+            return candidate_chunks[:top_k]
+
+        return self._apply_mmr(candidate_chunks, top_k)
+
+    def _apply_mmr(self, candidate_chunks: List[Tuple[Dict, float]], top_k: int) -> List[Tuple[Dict, float]]:
+        texts = [chunk["text"] for chunk, _ in candidate_chunks]
+        raw_scores = [score for _, score in candidate_chunks]
+
+        # Normalize RRF scores to [0, 1] for fair comparison with cosine similarity
+        min_score, max_score = min(raw_scores), max(raw_scores)
+        if max_score > min_score:
+            norm_scores = [(s - min_score) / (max_score - min_score) for s in raw_scores]
+        else:
+            norm_scores = [1.0] * len(raw_scores)
+
+        # Compute embeddings for candidates to check their similarity to each other
+        embeddings = self.embedder.encode(texts, convert_to_tensor=True)
+        sim_matrix = util.cos_sim(embeddings, embeddings).cpu().numpy()
+
+        selected_indices = []
+        unselected_indices = list(range(len(texts)))
+
+        # Select the item with the highest RRF score first
+        first_idx = int(np.argmax(norm_scores))
+        selected_indices.append(first_idx)
+        unselected_indices.remove(first_idx)
+
+        # Iteratively select chunks balancing Relevance and Diversity
+        while len(selected_indices) < top_k and unselected_indices:
+            best_score = -np.inf
+            best_idx = -1
+
+            for idx in unselected_indices:
+                max_sim_to_selected = max([sim_matrix[idx][s_idx] for s_idx in selected_indices])
                 
-        return normalized
+                # MMR Equation
+                mmr_score = self.lambda_mult * norm_scores[idx] - (1.0 - self.lambda_mult) * max_sim_to_selected
 
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[Dict, float]]:
-        """Performs both searches, normalizes scores, and returns a fused ranking."""
-        
-        # 1. Get raw results from both retrievers (fetch more to ensure good overlap)
-        fetch_k = max(top_k * 2, 10)
-        dense_results = self.dense_retriever.search(query, top_k=fetch_k)
-        sparse_results = self.sparse_retriever.search(query, top_k=fetch_k)
-        
-        # 2. Extract scores and map them by the unique chunk_id
-        dense_scores = {}
-        sparse_scores = {}
-        chunk_map = {} # To hold the actual chunk data
+                if mmr_score > best_score:
+                    best_score = mmr_score
+                    best_idx = idx
 
-        for chunk, distance in dense_results:
-            chunk_id = chunk["metadata"]["chunk_id"]
-            chunk_map[chunk_id] = chunk
-            # Invert L2 distance so higher is better
-            dense_scores[chunk_id] = 1.0 / (1.0 + distance)
+            selected_indices.append(best_idx)
+            unselected_indices.remove(best_idx)
 
-        for chunk, score in sparse_results:
-            chunk_id = chunk["metadata"]["chunk_id"]
-            chunk_map[chunk_id] = chunk
-            sparse_scores[chunk_id] = score
-
-        # 3. Normalize both score sets to a 0.0 - 1.0 scale
-        norm_dense = self._normalize_scores(dense_scores)
-        norm_sparse = self._normalize_scores(sparse_scores)
-
-        # 4. Calculate weighted sum for all unique chunks found
-        final_scores = {}
-        all_chunk_ids = set(norm_dense.keys()).union(set(norm_sparse.keys()))
-        
-        for chunk_id in all_chunk_ids:
-            d_score = norm_dense.get(chunk_id, 0.0)
-            s_score = norm_sparse.get(chunk_id, 0.0)
-            
-            # Weighted fusion formula
-            combined = (self.alpha * d_score) + ((1 - self.alpha) * s_score)
-            final_scores[chunk_id] = combined
-
-        # 5. Sort by final score descending and return Top-K
-        sorted_ids = sorted(final_scores.keys(), key=lambda k: final_scores[k], reverse=True)
-        
-        fused_results = []
-        for chunk_id in sorted_ids[:top_k]:
-            fused_results.append((chunk_map[chunk_id], final_scores[chunk_id]))
-            
-        return fused_results
-
-if __name__ == "__main__":
-    import sys
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from ingestion.loader import load_directory
-    from ingestion.cleaner import clean_documents
-    from ingestion.chunker import process_chunks
-    from retrieval.dense import DenseRetriever
-    from retrieval.sparse import SparseRetriever
-
-    # 1. Ingestion Pipeline
-    test_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    raw_docs = load_directory(test_dir)
-    cleaned_docs = clean_documents(raw_docs)
-    chunks = process_chunks(cleaned_docs, strategy="recursive", chunk_size=500, overlap=50)
-
-    # 2. Initialize and Index Both Retrievers
-    dense_retriever = DenseRetriever()
-    dense_retriever.index_documents(chunks)
-    
-    sparse_retriever = SparseRetriever()
-    sparse_retriever.index_documents(chunks)
-
-    # 3. Initialize Hybrid Retriever (50% Dense / 50% Sparse)
-    hybrid_retriever = HybridRetriever(dense_retriever, sparse_retriever, alpha=0.5)
-
-    # 4. Test Hybrid Query
-    test_query = "What chunking strategies are used for TF-IDF?"
-    print(f"\n--- Testing Hybrid Query ---")
-    print(f"Query: '{test_query}'")
-    
-    results = hybrid_retriever.search(test_query, top_k=3)
-    
-    for i, (chunk, score) in enumerate(results):
-        print(f"\nResult {i+1} (Fused Score: {score:.4f})")
-        print(f"Source: {chunk['metadata'].get('source', 'Unknown')} (Page {chunk['metadata'].get('page', 'N/A')})")
-        print(f"Text snippet: {chunk['text'][:200]}...")
+        return [candidate_chunks[i] for i in selected_indices]

@@ -22,11 +22,20 @@ class SparseRetriever:
             print("No chunks provided for indexing.")
             return
 
-        self.chunks = chunks
         print(f"Tokenizing {len(chunks)} chunks for sparse retrieval...")
         
+        # --- FAULT TOLERANCE: Ensure metadata and chunk_id exist ---
+        for i, chunk in enumerate(chunks):
+            if "metadata" not in chunk:
+                chunk["metadata"] = {}
+            # Inject fallback chunk_id for hybrid RRF alignment if missing
+            if "chunk_id" not in chunk["metadata"]:
+                chunk["metadata"]["chunk_id"] = str(i)
+
+        self.chunks = chunks
+        
         # Tokenize the text for each chunk
-        tokenized_corpus = [tokenize(chunk["text"]) for chunk in chunks]
+        tokenized_corpus = [tokenize(chunk.get("text", "")) for chunk in chunks]
         
         print("Building BM25 index...")
         self.bm25 = BM25Okapi(tokenized_corpus)
@@ -45,7 +54,6 @@ class SparseRetriever:
         doc_scores = self.bm25.get_scores(tokenized_query)
         
         # Sort indices by score in descending order (higher score = better match)
-        # We use standard Python sorting here since it's an in-memory array
         top_indices = sorted(range(len(doc_scores)), key=lambda i: doc_scores[i], reverse=True)[:top_k]
         
         results = []
@@ -90,7 +98,6 @@ if __name__ == "__main__":
     retriever.index_documents(chunks)
 
     # 3. Test exact keyword query
-    # Using specific terms from your Major Project Synopsis document
     test_query = "BM25 or TF-IDF"
     print(f"\n--- Testing Sparse/Keyword Query ---")
     print(f"Query: '{test_query}'")
@@ -102,5 +109,6 @@ if __name__ == "__main__":
     else:
         for i, (chunk, score) in enumerate(results):
             print(f"\nResult {i+1} (BM25 Score: {score:.4f})")
-            print(f"Source: {chunk['metadata'].get('source', 'Unknown')}")
-            print(f"Text snippet: {chunk['text'][:200]}...")
+            # Safely access metadata
+            print(f"Source: {chunk.get('metadata', {}).get('source', 'Unknown')}")
+            print(f"Text snippet: {chunk.get('text', '')[:200]}...")

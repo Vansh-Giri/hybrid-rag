@@ -1,35 +1,39 @@
 import os
+import sys
 import requests
 from typing import List, Dict, Tuple
-from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from groq import Groq
 
-load_dotenv()
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import settings
+from utils.logger import setup_logger
+
+logger = setup_logger("Generator")
 
 class RAGGenerator:
-    # Updated default models based on current API availability
-    def __init__(self, gemini_model="gemini-2.5-flash", ollama_model="phi4-mini:latest", groq_model="llama-3.1-8b-instant"):
+    def __init__(self, 
+                 gemini_model=settings.GEMINI_MODEL, 
+                 ollama_model=settings.OLLAMA_MODEL, 
+                 groq_model=settings.GROQ_MODEL):
+        
         self.gemini_model = gemini_model
         self.ollama_model = ollama_model
         self.groq_model = groq_model
-        self.ollama_url = "http://localhost:11434/api/generate"
+        self.ollama_url = settings.OLLAMA_URL
         
-        # Hardened system prompt to force exact mathematical output and strip conversational fluff
+        
         self.system_instruction = (
-            "You are a strict, precise technical assistant. Use ONLY the provided context to answer. "
-            "CRITICAL: If the user asks for a formula, equation, or code, extract it exactly as it appears in the context. "
-            "Wrap all mathematical formulas in standard LaTeX delimiters ($$ equation $$). "
-            "Do not add conversational filler. If the answer is not explicitly in the context, output exactly: 'Information not found in context.'"
+            "You are a precise technical assistant. Answer the user's question using ONLY the provided context. "
+            "WARNING: The context is extracted from academic PDFs using OCR. It may contain noisy formatting, missing spaces, or fragmented math symbols (e.g., 'Q K T' instead of QK^T). "
+            "Do your best to logically interpret these noisy fragments and reconstruct the intended mathematical equations. "
+            "FORMATTING RULE: Format all reconstructed equations using standard LaTeX wrapped in double dollar signs (e.g., $$ E = mc^2 $$). "
+            "If the concept is genuinely missing from the context, state that you do not have enough information."
         )
         
-        # Initialize Clients
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        self.gemini_client = genai.Client(api_key=gemini_key) if gemini_key else None
-        
-        groq_key = os.getenv("GROQ_API_KEY")
-        self.groq_client = Groq(api_key=groq_key) if groq_key else None
+        self.gemini_client = genai.Client(api_key=settings.GEMINI_API_KEY) if settings.GEMINI_API_KEY else None
+        self.groq_client = Groq(api_key=settings.GROQ_API_KEY) if settings.GROQ_API_KEY else None
 
     def _build_prompt(self, query: str, context_chunks: List[Tuple[Dict, float]], history: List[Dict] = None) -> str:
         context_text = "\n\n---\n\n".join(
@@ -78,20 +82,29 @@ class RAGGenerator:
             "model": self.ollama_model,
             "prompt": f"{self.system_instruction}\n\n{prompt}",
             "stream": False,
-            "options": {"num_ctx": 2048, "temperature": 0.0, "stop": ["\nQuestion:", "Current Question:"]}
+            "options": {
+                "num_ctx": 2048, 
+                "temperature": 0.0, 
+                "top_k": 40,       # Relaxed to allow natural text generation
+                "top_p": 0.9,      # Relaxed to prevent repetitive loops
+                "stop": ["\nQuestion:", "Current Question:"]
+            }
         }
+        
         response = requests.post(self.ollama_url, json=payload, timeout=60.0)
         response.raise_for_status()
-        return response.json().get("response", "")
+        return response.json().get("response", "").strip()
 
     def generate_answer(self, query: str, context_chunks: List[Tuple[Dict, float]], history: List[Dict] = None, provider: str = "gemini") -> Tuple[str, bool]:
         if not context_chunks:
+            logger.warning(f"No context chunks provided for query: '{query}'")
             return "No relevant context found to answer the query.", False
 
         prompt = self._build_prompt(query, context_chunks, history)
         used_fallback = False
         
         try:
+            logger.info(f"Generating answer using primary provider: {provider.upper()}")
             if provider == "gemini":
                 return self._generate_gemini(prompt), used_fallback
             elif provider == "groq":
@@ -100,10 +113,12 @@ class RAGGenerator:
                 return self._generate_ollama(prompt), used_fallback
                 
         except Exception as primary_e:
-            print(f"Primary provider '{provider}' failed: {primary_e}. Triggering fallback to Groq...")
+            logger.error(f"Primary provider '{provider}' failed: {primary_e}")
+            logger.warning("Triggering fallback to Groq...")
             used_fallback = True
             try:
                 # Fallback to Groq (fastest, most reliable)
                 return self._generate_groq(prompt), used_fallback
             except Exception as fallback_e:
+                logger.critical(f"System Failure! Primary Error: {primary_e} | Fallback Error: {fallback_e}")
                 return f"System Failure. Primary Error: {primary_e} | Fallback Error: {fallback_e}", used_fallback

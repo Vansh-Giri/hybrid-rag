@@ -6,9 +6,12 @@ from typing import List, Dict, Any
 from contextlib import asynccontextmanager
 import time
 from sentence_transformers import SentenceTransformer
+from retrieval.cache import SemanticCache
 
+# Ensure project root is in path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import settings  # Import centralized configuration
 from ingestion.loader import load_directory
 from ingestion.cleaner import clean_documents
 from ingestion.chunker import process_chunks
@@ -16,36 +19,63 @@ from retrieval.dense import DenseRetriever
 from retrieval.sparse import SparseRetriever
 from retrieval.hybrid import HybridRetriever
 from rag.generator import RAGGenerator
+from utils.logger import setup_logger
 
-# Define where to save the databases
-DB_DIR = os.path.join(os.path.dirname(__file__), "..", "vectorstore")
+# Initialize logger for this module
+logger = setup_logger("API_Main")
 
 pipeline_state = {
     "dense": None,
     "sparse": None,
     "hybrid": None,
-    "generator": RAGGenerator(gemini_model="gemini-2.5-flash", groq_model="llama-3.1-8b-instant"),
+    "generator": RAGGenerator(
+        gemini_model=settings.GEMINI_MODEL, 
+        groq_model=settings.GROQ_MODEL,
+        ollama_model=settings.OLLAMA_MODEL
+    ),
+    "embedder": None,  # Shared globally for caching, chunking, and MMR
+    "cache": None,     # Global cache instance
     "is_indexed": False
 }
 
 # --- Startup Logic (Loads indexes if they exist) ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if os.path.exists(os.path.join(DB_DIR, "dense.index")):
-        print("Found existing databases on disk. Loading into memory...")
-        dense = DenseRetriever()
-        dense.load(DB_DIR)
+    # Initialize global embedder
+    logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}...")
+    pipeline_state["embedder"] = SentenceTransformer(settings.EMBEDDING_MODEL)
+    
+    # Initialize Cache
+    pipeline_state["cache"] = SemanticCache(
+        embedder=pipeline_state["embedder"],
+        threshold=settings.CACHE_SIMILARITY_THRESHOLD,
+        index_path=settings.CACHE_INDEX_PATH,
+        map_path=settings.CACHE_MAP_PATH
+    )
+
+    if os.path.exists(os.path.join(settings.DB_DIR, "dense.index")):
+        logger.info("Found existing databases on disk. Loading into memory...")
+        dense = DenseRetriever(embedder=pipeline_state["embedder"])
+        dense.load(settings.DB_DIR)
         
         sparse = SparseRetriever()
-        sparse.load(DB_DIR)
+        sparse.load(settings.DB_DIR)
         
         pipeline_state["dense"] = dense
         pipeline_state["sparse"] = sparse
-        pipeline_state["hybrid"] = HybridRetriever(dense, sparse, alpha=0.5)
+        
+        # Initialize Hybrid with the embedder for MMR
+        pipeline_state["hybrid"] = HybridRetriever(
+            dense, 
+            sparse, 
+            embedder=pipeline_state["embedder"], 
+            alpha=0.5
+        )
+        
         pipeline_state["is_indexed"] = True
-        print("Successfully loaded databases! Ready for queries.")
+        logger.info("Successfully loaded databases! Ready for queries.")
     else:
-        print("No databases found on disk. Please trigger the /index endpoint.")
+        logger.warning("No databases found on disk. Please trigger the /index endpoint.")
     yield
 
 app = FastAPI(title="Hybrid RAG API", lifespan=lifespan)
@@ -61,6 +91,7 @@ class QueryRequest(BaseModel):
     alpha: float = 0.5
     history: List[ChatMessage] = []
     provider: str = "gemini"
+    bypass_cache: bool = False
 
 class SourceItem(BaseModel):
     source: str
@@ -78,45 +109,51 @@ class QueryResponse(BaseModel):
 @app.post("/index")
 def index_documents():
     try:
-        print("Starting indexing process...")
-        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        logger.info("Starting indexing process...")
         
-        raw_docs = load_directory(data_dir)
+        raw_docs = load_directory(settings.DATA_DIR)
         if not raw_docs:
             raise HTTPException(status_code=404, detail="No documents found.")
             
         cleaned_docs = clean_documents(raw_docs)
         
-        # Initialize local embedding model for Semantic Chunking
-        print("Loading embedding model for Semantic Chunking...")
-        embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        
-        # Process using the semantic strategy
-        print("Processing Semantic Chunks...")
+        logger.info(f"Processing {settings.CHUNK_STRATEGY} Chunks...")
         chunks = process_chunks(
             cleaned_docs, 
-            strategy="semantic", 
-            embedder=embedder
+            strategy=settings.CHUNK_STRATEGY, 
+            embedder=pipeline_state["embedder"] # Use global embedder here
         )
 
         if not chunks:
             raise HTTPException(status_code=400, detail="No valid chunks generated. Check document formatting.")
 
-        dense = DenseRetriever()
+        dense = DenseRetriever(embedder=pipeline_state["embedder"])
         dense.index_documents(chunks)
-        dense.save(DB_DIR) 
+        dense.save(settings.DB_DIR) 
         
         sparse = SparseRetriever()
         sparse.index_documents(chunks)
-        sparse.save(DB_DIR) 
+        sparse.save(settings.DB_DIR) 
         
         pipeline_state["dense"] = dense
         pipeline_state["sparse"] = sparse
-        pipeline_state["hybrid"] = HybridRetriever(dense, sparse, alpha=0.5)
+        
+        # Initialize Hybrid with the embedder for MMR
+        pipeline_state["hybrid"] = HybridRetriever(
+            dense, 
+            sparse, 
+            embedder=pipeline_state["embedder"], 
+            alpha=0.5
+        )
+        
         pipeline_state["is_indexed"] = True
         
-        return {"message": f"Successfully processed, indexed, and saved {len(chunks)} semantic chunks to disk."}
+        success_msg = f"Successfully processed, indexed, and saved {len(chunks)} {settings.CHUNK_STRATEGY} chunks to disk."
+        logger.info(success_msg)
+        return {"message": success_msg}
+        
     except Exception as e:
+        logger.error(f"Indexing failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -126,7 +163,16 @@ def query_system(request: QueryRequest):
         raise HTTPException(status_code=400, detail="System not indexed.")
         
     start_time = time.time()
+    cache = pipeline_state["cache"]
     
+    # 1. CHECK CACHE FIRST (Only if bypass_cache is False)
+    if not request.bypass_cache:
+        cached_response = cache.check(request.query)
+        if cached_response:
+            cached_response["latency_seconds"] = round(time.time() - start_time, 4)
+            return QueryResponse(**cached_response)
+    
+    # 2. FULL RETRIEVAL/GENERATION
     hybrid = pipeline_state["hybrid"]
     generator = pipeline_state["generator"]
     
@@ -152,10 +198,16 @@ def query_system(request: QueryRequest):
     
     latency = round(time.time() - start_time, 2)
     
-    return QueryResponse(
-        query=request.query, 
-        answer=answer, 
-        sources=sources,
-        latency_seconds=latency,
-        used_fallback=used_fallback
-    )
+    response_data = {
+        "query": request.query, 
+        "answer": answer, 
+        "sources": sources,
+        "latency_seconds": latency,
+        "used_fallback": used_fallback
+    }
+    
+    # 3. SAVE RESULT TO CACHE (Only if bypass_cache is False)
+    if not request.bypass_cache:
+        cache.add(request.query, response_data)
+    
+    return QueryResponse(**response_data)

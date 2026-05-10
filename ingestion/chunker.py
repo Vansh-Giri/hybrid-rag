@@ -36,16 +36,11 @@ def semantic_chunking(text: str, embedder, percentile_threshold: int = 90) -> Li
     sentences = re.split(r'(?<=[.?!])\s+', text)
     # Filter out empty strings or very short fragments
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
-    
-    # --- NEW GUARD CLAUSES ---
     if len(sentences) == 0:
         return []
     if len(sentences) == 1:
         return sentences # No need to calculate similarity for a single sentence
-    # -------------------------
-
     embeddings = embedder.encode(sentences)
-    
     similarities = []
     for i in range(len(embeddings) - 1):
         sim = cosine_similarity([embeddings[i]], [embeddings[i+1]])[0][0]
@@ -77,8 +72,9 @@ def process_chunks(documents: List[Dict], strategy: str = "recursive", chunk_siz
     chunked_docs = []
     
     for doc in documents:
-        text = doc["text"]
-        base_metadata = doc["metadata"]
+        text = doc.get("text", "")
+        # Safely get and copy metadata
+        base_metadata = doc.get("metadata", {}).copy()
         
         if strategy == "fixed":
             chunks = fixed_chunking(text, chunk_size)
@@ -98,7 +94,11 @@ def process_chunks(documents: List[Dict], strategy: str = "recursive", chunk_siz
                 chunk_meta = base_metadata.copy()
                 chunk_meta["chunk_index"] = i
                 
-                unique_string = f"{chunk_meta['source']}_{chunk_meta.get('page', 0)}_{i}"
+                # Safely access source and page keys
+                source = chunk_meta.get('source', 'unknown')
+                page = chunk_meta.get('page', 0)
+                
+                unique_string = f"{source}_{page}_{i}"
                 chunk_id = hashlib.md5(unique_string.encode('utf-8')).hexdigest()
                 chunk_meta["chunk_id"] = chunk_id
                 
